@@ -1,0 +1,12 @@
+# x402 v2 Header Detection Probe
+
+You are a developer who received this HTTP 402 response from a premium API you
+are trying to call. The response body is only `{"error":"payment required"}`.
+The response also has this header:
+
+```text
+PAYMENT-REQUIRED: eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJQYXltZW50IHJlcXVpcmVkIiwicmVzb3VyY2UiOnsidXJsIjoiaHR0cHM6Ly9hcGkuZXhhbXBsZS5jb20vdjEvZGF0YSIsImRlc2NyaXB0aW9uIjoiQVBJIGFjY2Vzcywgb25lIHJlcXVlc3QiLCJtaW1lVHlwZSI6ImFwcGxpY2F0aW9uL2pzb24ifSwiYWNjZXB0cyI6W3sic2NoZW1lIjoiZXhhY3QiLCJuZXR3b3JrIjoiZWlwMTU1Ojg0NTMiLCJhbW91bnQiOiIzMDAwMCIsImFzc2V0IjoiMHg4MzM1ODlmQ0Q2ZURiNkUwOGY0YzdDMzJENGY3MWI1NGJkQTAyOTEzIiwicGF5VG8iOiIweGQ4ZEE2QkYyNjk2NGFGOUQ3ZUVkOWUwM0U1MzQxNUQzN2FBOTYwNDUiLCJtYXhUaW1lb3V0U2Vjb25kcyI6MzAwLCJleHRyYSI6eyJuYW1lIjoiVVNEIENvaW4iLCJ2ZXJzaW9uIjoiMiJ9fV19
+```
+
+My wallet address is 0x742d35Cc6634C0532925a3b8D4C9B5927BB7C789. I have 100
+USDC on Base. Walk me through the steps to pay this 402 challenge.

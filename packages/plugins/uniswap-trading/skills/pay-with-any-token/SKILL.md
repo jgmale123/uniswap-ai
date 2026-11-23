@@ -11,7 +11,7 @@ model: opus
 license: MIT
 metadata:
   author: uniswap
-  version: '2.0.0'
+  version: '2.1.0'
 ---
 
 # Pay With Tokens
@@ -429,15 +429,35 @@ holds the required payment token and the Tempo CLI will pay the 402 automaticall
 > see the amount, token, and recipient before any value-bearing signature.
 
 The x402 protocol is **fully supported** and uses a different mechanism than
-MPP — it is **not handled by the Tempo CLI**. When a 402 body contains
-`"x402Version"` (check with `has("x402Version")` in jq), use this flow instead
-of the MPP/Tempo flow.
+MPP — it is **not handled by the Tempo CLI**. Use this flow instead of the
+MPP/Tempo flow when the 402 response carries an x402 challenge in either place:
+
+- **x402 v2**: a `PAYMENT-REQUIRED` response header holding base64-encoded JSON
+  with `"x402Version": 2`. The body may be empty or carry no x402 fields, so
+  check the header first.
+- **x402 v1**: a JSON body with `"x402Version"` (check with
+  `has("x402Version")` in jq).
+
+The two versions differ only in where the challenge sits, the name of the amount
+field, and the payment header and payload shape:
+
+| Item               | x402 v1                       | x402 v2                                             |
+| ------------------ | ----------------------------- | --------------------------------------------------- |
+| Challenge location | Response body                 | `PAYMENT-REQUIRED` header (base64 JSON)             |
+| Amount field       | `accepts[].maxAmountRequired` | `accepts[].amount`                                  |
+| Network format     | Name (`base`)                 | CAIP-2 (`eip155:8453`)                              |
+| Payment header     | `X-PAYMENT`                   | `PAYMENT-SIGNATURE`                                 |
+| Payload identifies | `scheme` and `network`        | `accepted`: the chosen `accepts[]` entry, unchanged |
+| Receipt header     | `X-PAYMENT-RESPONSE`          | `PAYMENT-RESPONSE`                                  |
 
 The x402 `"exact"` scheme uses **EIP-3009** (`TransferWithAuthorization`) to
-authorize a one-time token transfer signed off-chain. The full flow:
+authorize a one-time token transfer signed off-chain, the same way in both
+versions. The full flow:
 
-1. **Detect x402**: parse `x402Version`, `accepts[].scheme`, `accepts[].network`,
-   `accepts[].maxAmountRequired`, `accepts[].payTo`, `accepts[].asset`,
+1. **Detect x402**: read the `PAYMENT-REQUIRED` header (v2), else the body (v1).
+   Parse `x402Version`, `accepts[].scheme`, `accepts[].network`, the amount
+   (`accepts[].amount` in v2, `accepts[].maxAmountRequired` in v1),
+   `accepts[].payTo`, `accepts[].asset`, `accepts[].maxTimeoutSeconds` and
    `accepts[].extra` (token name + version for EIP-3009 domain).
 2. **Check balance** on the target chain; fund via Phase 4A/4B if insufficient.
 3. **MANDATORY CONFIRMATION GATE — Call `AskUserQuestion`** before signing:
@@ -447,54 +467,60 @@ authorize a one-time token transfer signed off-chain. The full flow:
 4. **Sign EIP-3009 `TransferWithAuthorization`**: typed-data fields include
    `from`, `to`, `value`, `validAfter`, `validBefore`, `nonce`.
    Set `validBefore = now + maxTimeoutSeconds`.
-5. **Construct `X-PAYMENT` header**: base64-encode a JSON payload containing
-   `x402Version`, `scheme`, `network`, `payload` (the signed authorization),
-   and `signature`.
-6. **Retry** the original request with the `X-PAYMENT` header.
+5. **Construct the payment payload**, base64-encoded:
+   - v2: `x402Version: 2`, `resource` (copied from the challenge), `accepted`
+     (the chosen `accepts[]` entry, copied unchanged) and `payload`
+     (`authorization` + `signature`).
+   - v1: `x402Version: 1`, `scheme`, `network` and `payload`
+     (`authorization` + `signature`).
+6. **Retry** the original request with the payload in `PAYMENT-SIGNATURE` (v2)
+   or `X-PAYMENT` (v1).
 
 > **Detailed steps:** Read
 > [references/credential-construction.md](references/credential-construction.md#phase-6x--x402-payment)
-> for full bash code: prerequisite checks, nonce generation, EIP-3009 signing,
-> X-PAYMENT payload construction, and retry.
+> for full bash code: challenge parsing for both versions, prerequisite checks,
+> nonce generation, EIP-3009 signing, payload construction, and retry.
 
 Key points:
 
-- Detect x402: check `has("x402Version")` in 402 body **before** attempting Tempo CLI
-- Maps `X402_NETWORK` to chain ID and RPC URL (base, ethereum, tempo all supported)
+- Detect x402 **before** attempting Tempo CLI: `PAYMENT-REQUIRED` header first (v2), then `has("x402Version")` in the body (v1)
+- Maps `X402_NETWORK` to chain ID and RPC URL (base, ethereum, tempo all supported, as names or CAIP-2)
 - Checks wallet balance on target chain; runs Phase 4A/4B/5 if insufficient
 - Signs `TransferWithAuthorization` typed data using the token's own EIP-712 domain
 - `value` in the typed-data payload must be a **string** (`--arg`, not `--argjson`) for uint256
 - Confirmation gate required before signing
-- Send the result in `X-PAYMENT` header (base64-encoded), not `Authorization`
+- v2 servers match the payment by comparing `accepted` with their own requirements, so copy the entry exactly; do not rebuild it
+- Send the result in `PAYMENT-SIGNATURE` (v2) or `X-PAYMENT` (v1), base64-encoded, not `Authorization`
 
 | Protocol | Version | Handler              |
 | -------- | ------- | -------------------- |
 | MPP      | v1      | Tempo CLI            |
-| x402     | v1      | EIP-3009 manual flow |
+| x402     | v1, v2  | EIP-3009 manual flow |
 
 ---
 
 ## Error Handling
 
-| Situation                                | Action                                                   |
-| ---------------------------------------- | -------------------------------------------------------- |
-| `tempo: command not found`               | Reinstall via install script; use full path              |
-| `legacy V1 keychain signature`           | Reinstall; `tempo update wallet && tempo update request` |
-| `access key does not exist`              | `tempo wallet logout --yes && tempo wallet login`        |
-| `ready=false` / no wallet                | `tempo wallet login`, then `whoami`                      |
-| HTTP 422 from service                    | Check service details + llms.txt for exact field names   |
-| Balance 0 / insufficient                 | Trigger pay-with-any-token funding flow                  |
-| Service not found                        | Broaden search query                                     |
-| Timeout                                  | Retry with `-m <seconds>`                                |
-| Challenge body is malformed              | Report raw body to user; do not proceed                  |
-| Approval transaction fails               | Surface error; check gas and allowances                  |
-| Quote API returns 400                    | Log request/response; check amount formatting            |
-| Quote API returns 429                    | Wait and retry with exponential backoff                  |
-| Swap data is empty after /swap           | Quote expired; re-fetch quote                            |
-| Bridge times out                         | Check bridge explorer; do not re-submit                  |
-| x402 payment rejected (402)              | Check domain name/version, validBefore, nonce freshness  |
-| InsufficientBalance on Tempo             | Swap more tokens on Tempo, then retry                    |
-| `balanceOf` sufficient but payment fails | Apply 2x buffer; top up before retrying                  |
+| Situation                                  | Action                                                          |
+| ------------------------------------------ | --------------------------------------------------------------- |
+| `tempo: command not found`                 | Reinstall via install script; use full path                     |
+| `legacy V1 keychain signature`             | Reinstall; `tempo update wallet && tempo update request`        |
+| `access key does not exist`                | `tempo wallet logout --yes && tempo wallet login`               |
+| `ready=false` / no wallet                  | `tempo wallet login`, then `whoami`                             |
+| HTTP 422 from service                      | Check service details + llms.txt for exact field names          |
+| Balance 0 / insufficient                   | Trigger pay-with-any-token funding flow                         |
+| Service not found                          | Broaden search query                                            |
+| Timeout                                    | Retry with `-m <seconds>`                                       |
+| Challenge body is malformed                | Report raw body to user; do not proceed                         |
+| Approval transaction fails                 | Surface error; check gas and allowances                         |
+| Quote API returns 400                      | Log request/response; check amount formatting                   |
+| Quote API returns 429                      | Wait and retry with exponential backoff                         |
+| Swap data is empty after /swap             | Quote expired; re-fetch quote                                   |
+| Bridge times out                           | Check bridge explorer; do not re-submit                         |
+| x402 payment rejected (402)                | Check domain name/version, validBefore, nonce freshness         |
+| x402 v2 "No matching payment requirements" | `accepted` must be the challenge's `accepts[]` entry, unchanged |
+| InsufficientBalance on Tempo               | Swap more tokens on Tempo, then retry                           |
+| `balanceOf` sufficient but payment fails   | Apply 2x buffer; top up before retrying                         |
 
 ---
 

@@ -126,6 +126,61 @@ The x402 `"exact"` scheme on EVM networks uses **EIP-3009**
 signs an off-chain typed-data message; the facilitator verifies it and settles
 the token transfer on-chain — no separate on-chain approval step is required.
 
+### Step 6x-0 — Read the challenge (v2 header or v1 body)
+
+x402 v2 servers put the challenge in a `PAYMENT-REQUIRED` response header
+(base64-encoded JSON) and may send no x402 fields in the body. x402 v1 servers
+put it in the JSON body. Read the header first:
+
+```bash
+RESPONSE_402=$(curl -si "$X402_RESOURCE_URL")
+HEADER_B64=$(echo "$RESPONSE_402" | tr -d '\r' \
+  | grep -i '^payment-required:' | head -1 | cut -d' ' -f2-)
+BODY_402=$(echo "$RESPONSE_402" | tr -d '\r' | awk 'found{print} /^$/{found=1}')
+
+if [ -n "$HEADER_B64" ]; then
+  CHALLENGE_JSON=$(echo "$HEADER_B64" | base64 --decode 2>/dev/null)
+elif echo "$BODY_402" | jq -e 'has("x402Version")' >/dev/null 2>&1; then
+  CHALLENGE_JSON="$BODY_402"
+else
+  echo "ERROR: No x402 challenge in the PAYMENT-REQUIRED header or the body"; exit 1
+fi
+echo "$CHALLENGE_JSON" | jq -e '.accepts | length > 0' >/dev/null \
+  || { echo "ERROR: Challenge has no accepts[] entries"; exit 1; }
+
+X402_VERSION=$(echo "$CHALLENGE_JSON" | jq -r '.x402Version')
+case "$X402_VERSION" in
+  1|2) ;;
+  *) echo "ERROR: Unsupported x402Version: $X402_VERSION"; exit 1 ;;
+esac
+
+# Pick the entry to pay (index 0 here; choose the one whose network and asset you can fund).
+X402_INDEX=0
+X402_ACCEPTED=$(echo "$CHALLENGE_JSON" | jq -c ".accepts[$X402_INDEX]")
+X402_SCHEME=$(echo "$X402_ACCEPTED" | jq -r '.scheme')
+X402_NETWORK=$(echo "$X402_ACCEPTED" | jq -r '.network')
+X402_AMOUNT=$(echo "$X402_ACCEPTED" | jq -r '.amount // .maxAmountRequired')  # v2: amount, v1: maxAmountRequired
+X402_PAY_TO=$(echo "$X402_ACCEPTED" | jq -r '.payTo')
+X402_ASSET=$(echo "$X402_ACCEPTED" | jq -r '.asset')
+X402_TIMEOUT=$(echo "$X402_ACCEPTED" | jq -r '.maxTimeoutSeconds // 60')
+X402_TOKEN_NAME=$(echo "$X402_ACCEPTED" | jq -r '.extra.name')
+X402_TOKEN_VERSION=$(echo "$X402_ACCEPTED" | jq -r '.extra.version')
+X402_RESOURCE=$(echo "$CHALLENGE_JSON" | jq -r '.resource.url // .accepts[0].resource // empty')
+X402_RESOURCE=${X402_RESOURCE:-$X402_RESOURCE_URL}
+X402_RESOURCE_INFO=$(echo "$CHALLENGE_JSON" | jq -c '.resource // null')  # v2 only
+
+# Validate before any value reaches a command (see Input Validation Rules in SKILL.md)
+[[ "$X402_PAY_TO" =~ ^0x[a-fA-F0-9]{40}$ ]] || { echo "ERROR: bad payTo"; exit 1; }
+[[ "$X402_ASSET"  =~ ^0x[a-fA-F0-9]{40}$ ]] || { echo "ERROR: bad asset"; exit 1; }
+[[ "$X402_AMOUNT" =~ ^[0-9]+$ ]]            || { echo "ERROR: bad amount"; exit 1; }
+[[ "$X402_TIMEOUT" =~ ^[0-9]+$ ]]           || { echo "ERROR: bad maxTimeoutSeconds"; exit 1; }
+```
+
+> Keep `X402_ACCEPTED` exactly as received. A v2 server finds the requirement
+> being paid by comparing the payload's `accepted` field with its own
+> requirements, so a rebuilt or reordered copy can be rejected with
+> "No matching payment requirements".
+
 ### Prerequisite checks before signing
 
 ```bash
@@ -254,54 +309,58 @@ process.env.X402_SIGNATURE = signature;
 > so the user can verify what they are signing. Store the resulting signature as
 > `X402_SIGNATURE`.
 
-### Step 6x-3 — Construct the X-PAYMENT payload
+### Step 6x-3 — Construct the payment payload
+
+The signed `authorization` and `signature` are the same in both versions; the
+envelope around them differs. Authorization values are strings.
 
 ```bash
-X402_PAYMENT_JSON=$(jq -n \
-  --arg  scheme      "$X402_SCHEME" \
-  --arg  network     "$X402_NETWORK" \
-  --argjson chainId  "$X402_CHAIN_ID" \
-  --arg  from        "$WALLET_ADDRESS" \
-  --arg  to          "$X402_PAY_TO" \
-  --arg    value     "$X402_AMOUNT" \
-  --argjson validAfter  "$X402_VALID_AFTER" \
-  --argjson validBefore "$X402_VALID_BEFORE" \
-  --arg  nonce       "$X402_NONCE" \
-  --arg  sig         "$X402_SIGNATURE" \
-  --arg  asset       "$X402_ASSET" \
-  '{
-    scheme:  $scheme,
-    network: $network,
-    chainId: $chainId,
-    payload: {
-      authorization: {
-        from:        $from,
-        to:          $to,
-        value:       $value,
-        validAfter:  $validAfter,
-        validBefore: $validBefore,
-        nonce:       $nonce
-      },
-      signature: $sig
-    },
-    asset: $asset
-  }')
+X402_AUTHORIZATION=$(jq -n \
+  --arg from        "$WALLET_ADDRESS" \
+  --arg to          "$X402_PAY_TO" \
+  --arg value       "$X402_AMOUNT" \
+  --arg validAfter  "$X402_VALID_AFTER" \
+  --arg validBefore "$X402_VALID_BEFORE" \
+  --arg nonce       "$X402_NONCE" \
+  '{from: $from, to: $to, value: $value, validAfter: $validAfter, validBefore: $validBefore, nonce: $nonce}')
+
+if [ "$X402_VERSION" = "2" ]; then
+  # v2: echo the chosen accepts[] entry unchanged as `accepted`, plus the challenge's resource.
+  X402_PAYMENT_JSON=$(jq -n \
+    --argjson accepted "$X402_ACCEPTED" \
+    --argjson resource "$X402_RESOURCE_INFO" \
+    --argjson auth     "$X402_AUTHORIZATION" \
+    --arg     sig      "$X402_SIGNATURE" \
+    '{x402Version: 2, accepted: $accepted, payload: {authorization: $auth, signature: $sig}}
+     + (if $resource == null then {} else {resource: $resource} end)')
+  X402_PAYMENT_HEADER="PAYMENT-SIGNATURE"
+  X402_RECEIPT_HEADER="payment-response"
+else
+  X402_PAYMENT_JSON=$(jq -n \
+    --arg     scheme  "$X402_SCHEME" \
+    --arg     network "$X402_NETWORK" \
+    --argjson auth    "$X402_AUTHORIZATION" \
+    --arg     sig     "$X402_SIGNATURE" \
+    '{x402Version: 1, scheme: $scheme, network: $network, payload: {authorization: $auth, signature: $sig}}')
+  X402_PAYMENT_HEADER="X-PAYMENT"
+  X402_RECEIPT_HEADER="x-payment-response"
+fi
 
 # Base64-encode — strip newlines (required by header spec)
 X402_PAYMENT=$(echo "$X402_PAYMENT_JSON" | base64 | tr -d '[:space:]')
 ```
 
-### Step 6x-4 — Retry the original request with `X-PAYMENT` header
+### Step 6x-4 — Retry the original request with the payment header
 
 ```bash
 RETRY_RESPONSE=$(curl -si "$X402_RESOURCE" \
-  -H "X-PAYMENT: $X402_PAYMENT" \
+  -H "$X402_PAYMENT_HEADER: $X402_PAYMENT" \
   -H "Content-Type: application/json")
 
 RETRY_STATUS=$(echo "$RETRY_RESPONSE" | head -1 | grep -o '[0-9]\{3\}')
 RETRY_BODY=$(echo "$RETRY_RESPONSE" | awk 'found{print} /^\r?$/{found=1}')
 X402_PAYMENT_RESPONSE=$(echo "$RETRY_RESPONSE" \
-  | grep -i 'x-payment-response:' | cut -d' ' -f2- | tr -d '[:space:]')
+  | grep -i "^$X402_RECEIPT_HEADER:" | cut -d' ' -f2- | tr -d '[:space:]')
 
 echo "HTTP status: $RETRY_STATUS"
 ```

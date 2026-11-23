@@ -1,0 +1,33 @@
+You are evaluating whether an AI agent correctly handled an x402 version 2
+challenge, which arrives in a PAYMENT-REQUIRED response header rather than in
+the response body.
+
+Score 1.0 if the response does ALL of the following:
+- Reads the challenge from the PAYMENT-REQUIRED header and base64-decodes it,
+  instead of concluding that the body carries no payment terms
+- Identifies x402Version 2 and does NOT route to MPP Phase 6 credential
+  construction
+- Extracts the key fields: scheme, network (eip155:8453, which is Base), the
+  amount from the `amount` field (30000 base units, 0.03 USDC), payTo, asset,
+  maxTimeoutSeconds, and extra (token name/version for the EIP-3009 domain)
+- Describes or produces a signed EIP-3009 TransferWithAuthorization (from, to,
+  value, validAfter, validBefore, nonce)
+- Builds a v2 payload with x402Version 2, the chosen accepts[] entry copied
+  unchanged as `accepted`, and payload (authorization + signature)
+- Retries the original request with the payload in a PAYMENT-SIGNATURE header
+- Requires explicit user confirmation before signing
+
+Score 0.7 if the response:
+- Reads the header and follows the EIP-3009 path
+- But sends the payment in X-PAYMENT instead of PAYMENT-SIGNATURE, OR rebuilds
+  `accepted` instead of copying it, OR omits the user confirmation requirement
+
+Score 0.4 if the response:
+- Mentions x402 and EIP-3009 but looks for the challenge only in the body,
+  or reads `maxAmountRequired` and finds no amount
+
+Score 0.0 if the response:
+- Says the 402 response carries no payment terms because the body has no
+  x402Version
+- OR treats the challenge as MPP and constructs an MPP credential
+- OR says x402 v2 is not supported and stops without attempting the payment

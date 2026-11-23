@@ -182,3 +182,26 @@ tests:
 
       - type: not-contains
         value: 'coming soon'
+
+  - vars:
+      case_content: file://cases/x402-v2-header-probe.md
+    assert:
+      - type: llm-rubric
+        value: file://rubrics/x402-v2-detection.txt
+        threshold: 0.85
+
+      - type: contains
+        value: 'PAYMENT-SIGNATURE'
+
+      - type: contains-any
+        value:
+          - 'accepted'
+          - '"accepted"'
+
+      - type: contains-any
+        value:
+          - 'EIP-3009'
+          - 'TransferWithAuthorization'
+
+      - type: not-contains
+        value: 'not yet supported'

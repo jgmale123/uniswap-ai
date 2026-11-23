@@ -53,7 +53,7 @@ This skill is **not** needed for regular token swaps. Use the
 | Protocol | Version | Handler        |
 | -------- | ------- | -------------- |
 | MPP      | v1      | Tempo CLI      |
-| x402     | v1      | Manual signing |
+| x402     | v1, v2  | Manual signing |
 
 ## Prerequisites
 
